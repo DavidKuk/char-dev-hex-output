@@ -59,10 +59,10 @@ To get started with this project:
 
 To write data to the device, you can use standard file write operations. When you write data to the device, it will be processed and written to the `/tmp/output` file in a hexadecimal format with 16 bytes per row. The module converts data to hex format, including offset values.
 
-Example:
+Example: Currently only `root` user has permission to write to the `/dev/loop` characterr device file.
 
 ```bash
-sudo echo -n "Hello, World!" > /dev/loop
+echo -e "Rainy days!" > /dev/loop
 ```
 
 The content of `/tmp/output` file after writing to the `/dev/loop`
