@@ -96,5 +96,5 @@ This project is licensed under the [GNU General Public License (GPL)](LICENSE).
 
 ## Notes
 
-- Code was tested and builded on `x86_64, 64-bit Little Endian, 5.15.0-84-generic` machine.
-- For some file types writing in hexadecimal format to the file is not working properly.
+- Code was tested and builded on `x86_64, 64-bit Little Endian, 5.15.0-87-generic` machine.
+- This code does not currently support indicating a repetition of rows with an asterisk (*) sign.
