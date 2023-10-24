@@ -10,19 +10,23 @@
 #define DEV_NAME "loop"
 #define FAILURE -1
 #define SUCCESS  1
+#define F_OPEN_TRUNCATE_MODE  0
+#define F_OPEN_APPEND_MODE  1
 
 dev_t dev = 0;
 static struct class *dev_class;
 static struct cdev loop_cdev;
+loff_t F_OFFSET;
 
 static int      __init loop_driver_init(void);
 static void     __exit loop_driver_exit(void);
 static int      dev_open(struct inode *inode, struct file *file);
 static int      dev_release(struct inode *inode, struct file *file);
-static ssize_t  dev_write(struct file *filp, const char *buf, size_t len, loff_t * off);
-struct file     *open_file_in_write_mode(void);
+static ssize_t  dev_write(struct file *filp, const char *buf, size_t len, loff_t *offset);
+struct file     *open_file_in_write_mode(short open_mode);
 int             write_to_the_file(struct file *file, char *buffer, const size_t size, loff_t offset);
-static void     write_to_the_file_in_hex_format(char *buffer, size_t len);
+static void     write_spaces(struct file *file, uint16_t max_row_bytes, uint16_t row_bytes, loff_t offset);
+static void     write_to_the_file_in_hex_format(char *buffer, size_t len, loff_t offset);
 
 /*
  * Structure that defines file operations (write, open, release)
@@ -44,26 +48,55 @@ static int dev_open(struct inode *inode, struct file *file) {
 }
 
 /*
- * The function just prints info to the kernel log file when device driver is closed
+ * dev_release - Function is called when the device driver is released or closed. 
+ * Responsible to writing the last OFFSET to the end of the file (/tmp/output) in hex format.
+ *
+ * @param inode - Pointer to the inode structure.
+ * @param file - Pointer to the file structure.
+ *
+ * Function returns 0 on success.
+ * 
  */
 static int dev_release(struct inode *inode, struct file *file) {
-
-        pr_info("Device driver is released...");
-        return 0;
+    struct file *out_file;
+    char offset_in_hex [8];
+    loff_t offset = F_OFFSET;
+    if((out_file = open_file_in_write_mode(F_OPEN_APPEND_MODE)) == NULL){
+        pr_err("Couldn't open the '%s' file", FILE_PATH);
+        filp_close(out_file, NULL);
+    } else {
+        pr_err("Writing the OFFSET to the end of '%s' file", FILE_PATH);
+        write_to_the_file(out_file, "\n", 1, offset);
+        snprintf(offset_in_hex, sizeof(offset_in_hex), "%07llx", offset);
+        write_to_the_file(out_file, offset_in_hex, sizeof(offset_in_hex)-1, offset);
+        write_to_the_file(out_file, "\n", 1, offset);
+    }
+    pr_info("Device driver is released...");
+    return 0;
 }
 
+
 /**
- * open_file_in_write_mode - Open a file in write mode with optional creation, truncation, and append.
+ * open_file_in_write_mode - Open a file in write mode with specified options.
  *
- * This function opens a file specified by `FILE_PATH` in write mode with options for
- * creating the file, truncating it if it exists, and enabling append mode. If the file
- * cannot be opened, an error message is displayed, and a NULL pointer is returned.
+ * @param open_mode - The mode for opening the file (F_OPEN_TRUNCATE_MODE or F_OPEN_APPEND_MODE).
  *
- * Returns a pointer to the opened file structure on success, or NULL on failure.
+ * This function opens a file at the specified path in write mode with options based on
+ * the specified open_mode. It can either create and truncate the file or append to it.
+ *
+ * This function returns a pointer to the opened file structure, or NULL if there was an error.
  */
-struct file *open_file_in_write_mode(void) {
+struct file *open_file_in_write_mode(short open_mode) {
     struct file *file;
-    file = filp_open(FILE_PATH, O_WRONLY | O_CREAT | O_APPEND | O_TRUNC, 0664);
+    if (open_mode == F_OPEN_TRUNCATE_MODE){
+        file = filp_open(FILE_PATH, O_WRONLY | O_CREAT | O_APPEND | O_TRUNC, 0664);
+    } else if (open_mode == F_OPEN_APPEND_MODE) {
+        file = filp_open(FILE_PATH, O_WRONLY | O_CREAT | O_APPEND, 0664);
+    } else
+    {
+      pr_err("Incorrect open mode was specified!");
+      return NULL;
+    }
     if (IS_ERR(file)) {
         pr_err("Error while opening the '%s' file.", FILE_PATH);
         return NULL;
@@ -100,28 +133,52 @@ int write_to_the_file(struct file *file, char *buffer, const size_t size, loff_t
 }
 
 /**
+ * write_spaces - Writes spaces in the file (/tmp/output) to pad row with fewer than 16 bytes.
+ *
+ * @filp: File structure representing the file to write to.
+ * @max_row_bytes: Maximum bytes for a row
+ * @row_bytes: Actual written bytes for a row
+ * @off: File offset
+ *
+ */
+static void write_spaces(struct file *file, uint16_t max_row_bytes, uint16_t row_bytes, loff_t offset){
+    short space_cnt;
+    char *spaces = NULL;
+    space_cnt = (max_row_bytes - (row_bytes)) * 2 + 8 - (row_bytes/2);
+    pr_info("Space count: %hu", space_cnt);
+    spaces = kmalloc(space_cnt, GFP_KERNEL); // Allocate memory from kernel space
+    if (!spaces) {
+        pr_err("Failed to allocate memory from kernel space... Function name: %s", __func__);
+    } else {
+        memset(spaces, ' ', space_cnt);
+        write_to_the_file(file, spaces, space_cnt, offset);
+        kfree(spaces);
+    }
+}
+
+/**
  * write_to_the_file_in_hex_format - Convert and write data in hexadecimal format to a file
  *
  * @buffer: Pointer to the input character buffer.
  * @len: Length of the input data.
+ * @off: File offset
  *
  * This function takes a character buffer, converts its contents into hexadecimal format,
  * and writes the data to a file. It ensures that the output is formatted with 16 bytes per row,
  * and includes hexadecimal offset values at the beginning of each row. The data is written to
  * the file in a formatted manner.
  *
- * PLEASE NOTE: Function is not working correctly for jpeg and bin file type.
- *              Another approach needed to make it work correctly.
- *
  */
-static void write_to_the_file_in_hex_format(char *buffer, size_t len){
+static void write_to_the_file_in_hex_format(char *buffer, size_t len, loff_t offset){
     struct file *file;
     char *ptr = buffer;
-    short row_bytes = 0;
-    long int offset = 0;
-    char offset_in_hex [8];
-    char bytes_in_hex [6];
-    if((file = open_file_in_write_mode()) == NULL){
+    uint16_t max_row_bytes = 16, row_bytes = 0;
+    char offset_in_hex [8], bytes_in_hex [6];
+    short f_open_mode = F_OPEN_TRUNCATE_MODE;
+    if (offset > 0) {
+            f_open_mode = F_OPEN_APPEND_MODE;
+    }
+    if((file = open_file_in_write_mode(f_open_mode)) == NULL){
         pr_err("Couldn't open the '%s' file", FILE_PATH);
         filp_close(file, NULL);
     } else {
@@ -129,12 +186,12 @@ static void write_to_the_file_in_hex_format(char *buffer, size_t len){
         while(ptr < buffer + len){
             if ((ptr + 1) < buffer + len){
                 unsigned short two_bytes = (((unsigned short)ptr[1]) << 8) | (uint8_t)ptr[0];
-                if ((row_bytes % 16) == 0){
+                if ((row_bytes % max_row_bytes) == 0){
                     offset+=row_bytes;
                     if (offset > 0){
                         write_to_the_file(file, "\n", 1, offset);
                     }
-                    snprintf(offset_in_hex, 8, "%07lx\n", offset);
+                    snprintf(offset_in_hex, 8, "%07llx", offset);
                     write_to_the_file(file, offset_in_hex, sizeof(offset_in_hex)-1, offset);
                     row_bytes = 0;
                 }
@@ -148,13 +205,11 @@ static void write_to_the_file_in_hex_format(char *buffer, size_t len){
             unsigned short two_bytes = (unsigned short) buffer[len-1];
             snprintf(bytes_in_hex, 6, " %04x", two_bytes);
             write_to_the_file(file, bytes_in_hex, sizeof(bytes_in_hex)-1, offset);
-            row_bytes-=1;
         }
         offset+=row_bytes;
-        if (offset > 0)
-            write_to_the_file(file, "\n", 1, offset);
-        snprintf(offset_in_hex, sizeof(offset_in_hex), "%07lx", offset);
-        write_to_the_file(file, offset_in_hex, sizeof(offset_in_hex)-1, offset);
+        if ((max_row_bytes - row_bytes) != 0 ){
+            write_spaces(file, max_row_bytes, row_bytes, offset);
+        }
         filp_close(file, NULL);
         pr_info("Writing buffer content to the file in hex format is completed.");
     }
@@ -166,25 +221,27 @@ static void write_to_the_file_in_hex_format(char *buffer, size_t len){
  * @filp:      File structure representing the file to write to.
  * @buf:       User-space buffer containing data to be written.
  * @len:       Length of the data to be written.
- * @off:       Pointer to the current file offset (not used in this function).
+ * @offset:       Pointer to the current file offnset.
  *
  * This function allocates kernel memory, copies data from the user space, writes
  * the data to a file in hexadecimal format, and then releases the allocated memory.
  *
  * Returns the number of bytes written (len).
  */
-static ssize_t dev_write(struct file *filp, const char __user *buf, size_t len, loff_t *off) {
+static ssize_t dev_write(struct file *filp, const char __user *buf, size_t len, loff_t *offset) {
         char *kernel_buffer = kmalloc(len, GFP_KERNEL); // Allocate memory from kernel space
         if (!kernel_buffer) {
-            pr_err("Failed to allocate memory from kernel space...");
+            pr_err("Failed to allocate memory from kernel space... Function name: %s", __func__);
         } else {
             int bytes_copied = copy_from_user(kernel_buffer, buf, len);
             if (bytes_copied == 0) {
                 pr_info("Bytes are copied to kernel space from user space...");
             }
-            write_to_the_file_in_hex_format(kernel_buffer, len);
+            write_to_the_file_in_hex_format(kernel_buffer, len, *offset);
+            *offset += len;
             kfree(kernel_buffer);
         }
+        F_OFFSET = *offset;
         return len;
 }
 
@@ -250,7 +307,7 @@ MODULE_LICENSE("GPL"); // Specifies the license under which the module is releas
 MODULE_AUTHOR("David Kukulikyan <davidkuk25@gmail.com>"); // Specifies the author's name and contact email.
 // Provides a description of the module's functionality
 MODULE_DESCRIPTION("Linux kernel device driver that creates /dev/loop device that loops the input into /tmp/output file with in a hex format (16 bytes per row).");
-MODULE_VERSION("0.2"); // Specifies the version of the module (0.2).
+MODULE_VERSION("0.4"); // Specifies the version of the module (0.4).
 
 // These lines define which functions should be called when the module is loaded and unloaded.
 module_init(loop_driver_init);
